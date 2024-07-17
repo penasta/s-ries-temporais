@@ -1,0 +1,1702 @@
+---
+title: ''
+author: ''
+date: ''
+output:
+  pdf_document:
+    latex_engine: xelatex
+  fig_crop: no
+  html_document:
+    df_print: paged
+subtitle: ''
+highlight: tango
+number_sections: no
+fig_caption: yes
+keep_tex: yes
+includes:
+  in_header: Estilo.sty
+classoption: a4paper
+always_allow_html: yes
+---
+  
+  
+\begin{center}
+{\Large
+  DEPARTAMENTO DE ESTATÍSTICA} \\ [0.5cm]
+\begin{figure}[!t]
+\centering
+\includegraphics[width=9cm, keepaspectratio]{logo-UnB.eps}
+\end{figure} 
+{\large
+  `r format(Sys.time(), '%d %B %Y')`} \\[0.5cm]
+{\LARGE
+  \textbf{Lista 6}} \\ [0.5cm]
+{\Large
+  Prof. Dr. Raul Yukihiro Matsushita} \\ [0.5cm]
+{\Large
+  Aluno: Bruno Gondim Toledo} \\ [0.5cm]
+{\Large
+  Matrícula: 15/0167636} \\ [0.5cm]
+{\Large
+  Análise de séries temporais} \\ [0.5cm]
+{\Large
+  1º/2024} \\[0.5cm]
+\end{center}
+
+\newpage
+
+```{r setup, include=F}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(tidyverse,astsa,timetk,feasts,gridExtra,aTSA,geoTS,tictoc,knitr,MLmetrics)
+
+df <- read_csv("../arquivos/listas/lista6/ALGONQUIN_PARK_Ontario_Canada.csv")
+colnames(df)[5] = "data"
+df$data <- paste(df$data, "-01", sep = "")
+```
+
+Tente analisar separadamente as seguintes séries temporais mensais encontradas no arquivo "ALGONQUIN_PARK_Ontario_Canada.csv":
+
+# 1. "Mean Max Temp (°C)";
+
+```{r}
+df1 = df[,c(5,8)]
+df1 = df1 %>% drop_na()
+colnames(df1)[2] = "mean_max_temp"
+```
+
+```{r}
+df1$data = as.Date(df1$data)
+df1 = tsibble::as_tsibble(df1,index=data,regular=F)
+```
+
+## Visualizando a série com uma linha suavizada
+
+```{r, warning=FALSE}
+df1 %>% 
+  plot_time_series(data,mean_max_temp, .interactive = F, .smooth = T)
+
+```
+
+```{r, warning=FALSE}
+FAC1 = df1 %>%
+  ACF(var = mean_max_temp,lag_max = 20) %>%
+  autoplot() +
+  labs(title="FAC")
+
+FACP1 = df1 %>%
+  ACF(var = mean_max_temp,lag_max = 20,type = "partial") %>%
+  autoplot() +
+  labs(title="FACP")
+
+grid.arrange(FAC1, FACP1, nrow = 1)
+
+```
+
+```{r}
+aTSA::adf.test(ts(df1$mean_max_temp), nlag = 5)
+```
+
+O teste de Dickey-Fuller sugere a estacionariedade da série
+
+```{r}
+y <- ts(df1$mean_max_temp)
+
+fit1 <- haRmonics(y = y,
+                  numFreq = 1,
+                  delta = 0.1)
+fit3 <- haRmonics(y = y,
+                   numFreq = 3,
+                   delta = 0.1)
+fit6 <- haRmonics(y = y,
+                    numFreq = 6,
+                    delta = 0.1)
+fit12 <- haRmonics(y = y,
+                    numFreq = 12,
+                    delta = 0.1)
+
+x = ts(fit1$fitted)
+w = ts(fit3$fitted)
+z = ts(fit6$fitted)
+v = ts(fit12$fitted)
+
+plot(y, pch = 16, main = "Previsoes de uma modelagem Harmonica")
+lines(x ,lty = 5, col = "green")
+lines(w, lty = 4, col = "red")
+lines(z, lty = 3, col = "blue")
+lines(v, lty = 2, col = "orange")
+legend("topleft", legend = c("1", "3", "6","12"),
+       col = c("green", "red", "blue","orange"), lty = c(5, 4, 3,2))
+
+```
+
+A modelagem harmônica foi satisfatória em capturar todas as estruturas da série, deixando apenas ruido branco.
+
+Visto que a série não necessita de diferenciação, farei a modelagem sarima com ordem de sazonalidade = 12, argumentos d = D = 0. Iniciei com grid de parâmetros p,P,q,Q no intervalo [0,2]; e após uma iteração e avaliação, expandi o grid para intervalo [0,3] para alguns parâmetros cujo melhor modelo se encontrava na fronteira do intervalo.
+
+```{r,echo=TRUE,cache=TRUE,results='hide',warning=FALSE}
+modelos <- data.frame(p = integer(),
+                      P = integer(),
+                      q = integer(),
+                      Q = integer(),
+                      AIC = numeric(),
+                      BIC = numeric())
+
+tic()
+for(p in 0:3){
+  for(P in 0:2){
+      for(q in 0:3){
+          for(Q in 0:3){
+            tryCatch({
+              fit = astsa::sarima(y, details = FALSE, Model = FALSE,
+                           p = p, d = 0, q = q, P = P, D = 0, Q = Q, S = 12)
+              AIC = fit$ICs[1]
+              BIC = fit$ICs[3]
+              mod = c(p, P, q, Q, AIC, BIC)
+              modelos = rbind(modelos, mod)
+            }, error = function(e) {
+            })
+        }
+      }
+    }
+ }
+toc()
+
+colnames(modelos) = c("p","P","q","Q","AIC","BIC")
+
+modelo = modelos %>%
+  arrange(BIC, AIC) %>% head(1) 
+```
+
+Logo, o melhor modelo (minimiza BIC) é o com os parâmetros:
+
+```{r}
+kable(modelo)
+```
+
+```{r}
+fit = astsa::sarima(y,p = 2, d = 0, q = 2, P = 0, D = 0, Q = 1, S = 12)
+
+res = as_tsibble(fit[["fit"]][["residuals"]])
+
+res %>%
+  ACF(value,lag_max = 50) %>%
+  autoplot() +
+  labs(title="FAC sob os residuos do modelo")
+
+res %>%
+  ACF(value,lag_max = 50,type = "partial") %>%
+  autoplot() +
+  labs(title="FACP sob os residuos do modelo")
+
+Box.test(fit[["fit"]][["residuals"]], lag = 50, type = "Ljung")
+
+shapiro.test(fit[["fit"]][["residuals"]])
+```
+
+Sob a hipótese nula de independência, o teste de Ljung-Box não rejeita a hipótese nula. Portanto, existem indícios de independência na série dos resíduos.
+
+Avaliando as formas da FAC, FACP e resultado do teste de Ljung-Box, não aparenta haver autocorrelação significativa com lag = 50 para os resíduos, sugerindo que os resíduos se tratam de ruído branco. Logo, este modelo aparenta ter ajustado quanto a estrutura de dados, sendo um modelo adequado para previsões. Além disso, o teste de Shapiro-Wilk não rejeita a normalidade dos resíduos.
+
+```{r}
+prev = sarima.for(y,p = 0, d = 1, q = 1, P = 0, D = 1, Q = 1, S = 12,
+           n.ahead = 5, gg=TRUE, col=4,main="Previsao do modelo completo p/ 5 prox. passos") 
+```
+
+```{r}
+prev
+```
+
+```{r}
+treino = ts(y[1:513])
+teste = ts(y[514:518]) 
+```
+
+```{r}
+prev = sarima.for(treino,p = 0, d = 1, q = 1, P = 0, D = 1, Q = 1, S = 12,
+           n.ahead = 5, gg=TRUE, col=4,main="Modelo com n-5 obs, e 5 pred") 
+```
+
+```{r}
+prev$pred
+```
+
+```{r}
+MAPE = MAPE(prev$pred, as.vector(teste))
+MAPE
+```
+
+Com um MAPE = `r MAPE`, ou seja, estando abaixo de 10%, podemos dizer que se trata de um excelente modelo preditivo.
+
+```{r}
+prev = sarima.for(y,p = 0, d = 1, q = 1, P = 0, D = 1, Q = 1, S = 12,
+           n.ahead = 12, gg=TRUE, col=4,main="Prev do modelo para os proximos 12 passos") 
+```
+
+```{r,warning=FALSE}
+datas <- seq.Date(from = as.Date("1960-09-01"), to = as.Date("1961-08-31"), by = "months")
+
+previsoes = data.frame(datas,prev$pred,prev$se)
+colnames(previsoes) = c("data","Valores_preditos","Erro_padrao")
+
+previsoes = previsoes %>%
+  mutate(Limite_superior = Valores_preditos + (1.96 * Erro_padrao),
+         Limite_inferior = Valores_preditos - (1.96 * Erro_padrao))
+
+ggplot(previsoes, aes(x = data)) +
+  geom_line(aes(y = Valores_preditos), color = "blue", size = 1) +
+  geom_point(aes(y = Valores_preditos), color = "blue", size = 3) +
+  geom_ribbon(aes(ymin = Limite_inferior, ymax = Limite_superior), fill = "lightblue", alpha = 0.5) +
+  labs(title = "Valores preditos com banda de previsao c/ 95% de cobertura",
+       x = "",
+       y = "Valores Preditos") +
+  theme_minimal()
+```
+
+Os diagnósticos do modelo foram todos atendidos com folga. Portanto, as previsões deste modelo apresentam alta credibilidade. Considerando a banda de confiança e a especificidade dos dados, é bastante improvável que este modelo se torne inútil, mesmo a longo prazo. Ainda assim, novos valores devem ser constantemente adicionados para modelagem, visto que em algum ponto este comportamento pode variar.
+
+# 2. "Mean Min Temp (°C)";
+
+```{r}
+df2 = df[,c(5,10)]
+df2 = df2 %>% drop_na()
+colnames(df2)[2] = "mean_min_temp"
+```
+
+```{r}
+df2$data = as.Date(df2$data)
+df2 = tsibble::as_tsibble(df2,index=data,regular=F)
+```
+
+## Visualizando a série com uma linha suavizada
+
+```{r, warning=FALSE}
+df2 %>% 
+  plot_time_series(data,mean_min_temp, .interactive = F, .smooth = T)
+
+```
+
+```{r, warning=FALSE}
+FAC2 = df2 %>%
+  ACF(var = mean_min_temp,lag_max = 20) %>%
+  autoplot() +
+  labs(title="FAC")
+
+FACP2 = df2 %>%
+  ACF(var = mean_min_temp,lag_max = 20,type = "partial") %>%
+  autoplot() +
+  labs(title="FACP")
+
+grid.arrange(FAC2, FACP2, nrow = 1)
+
+```
+
+```{r}
+aTSA::adf.test(ts(df2$mean_min_temp), nlag = 5)
+```
+
+O teste de Dickey-Fuller sugere a estacionariedade da série
+
+```{r}
+y <- ts(df2$mean_min_temp)
+
+fit1 <- haRmonics(y = y,
+                  numFreq = 1,
+                  delta = 0.1)
+fit3 <- haRmonics(y = y,
+                   numFreq = 3,
+                   delta = 0.1)
+fit6 <- haRmonics(y = y,
+                    numFreq = 6,
+                    delta = 0.1)
+fit12 <- haRmonics(y = y,
+                    numFreq = 12,
+                    delta = 0.1)
+
+x = ts(fit1$fitted)
+w = ts(fit3$fitted)
+z = ts(fit6$fitted)
+v = ts(fit12$fitted)
+
+plot(y, pch = 16, main = "Previsoes de uma modelagem Harmonica")
+lines(x ,lty = 5, col = "green")
+lines(w, lty = 4, col = "red")
+lines(z, lty = 3, col = "blue")
+lines(v, lty = 2, col = "orange")
+legend("topleft", legend = c("1", "3", "6","12"),
+       col = c("green", "red", "blue","orange"), lty = c(5, 4, 3,2))
+
+```
+
+A modelagem harmônica foi satisfatória em capturar todas as estruturas da série, deixando apenas ruido branco.
+
+Visto que a série não necessita de diferenciação, farei a modelagem sarima com ordem de sazonalidade = 12, argumentos d = D = 0. Iniciei com grid de parâmetros p,P,q,Q no intervalo [0,2]; e após uma iteração e avaliação, expandi o grid para intervalo [0,3] para o parâmetro q = 3.
+
+```{r,echo=TRUE,cache=TRUE,results='hide',warning=FALSE}
+modelos <- data.frame(p = integer(),
+                      P = integer(),
+                      q = integer(),
+                      Q = integer(),
+                      AIC = numeric(),
+                      BIC = numeric())
+
+tic()
+for(p in 0:2){
+  for(P in 0:2){
+      for(q in 0:3){
+          for(Q in 0:2){
+            tryCatch({
+              fit = astsa::sarima(y, details = FALSE, Model = FALSE,
+                           p = p, d = 0, q = q, P = P, D = 0, Q = Q, S = 12)
+              AIC = fit$ICs[1]
+              BIC = fit$ICs[3]
+              mod = c(p, P, q, Q, AIC, BIC)
+              modelos = rbind(modelos, mod)
+            }, error = function(e) {
+            })
+        }
+      }
+    }
+ }
+toc()
+
+colnames(modelos) = c("p","P","q","Q","AIC","BIC")
+
+modelo = modelos %>%
+  arrange(BIC, AIC) %>% head(1) 
+```
+
+Logo, o melhor modelo (minimiza BIC) é o com os parâmetros:
+
+```{r}
+kable(modelo)
+```
+
+```{r}
+fit = astsa::sarima(y,p = 0, d = 0, q = 2, P = 1, D = 0, Q = 1, S = 12)
+
+res = as_tsibble(fit[["fit"]][["residuals"]])
+
+res %>%
+  ACF(value,lag_max = 50) %>%
+  autoplot() +
+  labs(title="FAC sob os residuos do modelo")
+
+res %>%
+  ACF(value,lag_max = 50,type = "partial") %>%
+  autoplot() +
+  labs(title="FACP sob os residuos do modelo")
+
+Box.test(fit[["fit"]][["residuals"]], lag = 50, type = "Ljung")
+
+shapiro.test(fit[["fit"]][["residuals"]])
+```
+
+## Diferenciando 1 vez a série
+
+```{r}
+fit = astsa::sarima(y,p = 0, d = 1, q = 2, P = 1, D = 1, Q = 1, S = 12)
+
+res = as_tsibble(fit[["fit"]][["residuals"]])
+
+res %>%
+  ACF(value,lag_max = 50) %>%
+  autoplot() +
+  labs(title="FAC sob os residuos do modelo")
+
+res %>%
+  ACF(value,lag_max = 50,type = "partial") %>%
+  autoplot() +
+  labs(title="FACP sob os residuos do modelo")
+
+Box.test(fit[["fit"]][["residuals"]], lag = 50, type = "Ljung")
+
+shapiro.test(fit[["fit"]][["residuals"]])
+```
+
+## Diferenciando 2 vezes a série
+
+```{r}
+fit = astsa::sarima(y,p = 0, d = 2, q = 2, P = 1, D = 2, Q = 1, S = 12)
+
+res = as_tsibble(fit[["fit"]][["residuals"]])
+
+res %>%
+  ACF(value,lag_max = 50) %>%
+  autoplot() +
+  labs(title="FAC sob os residuos do modelo")
+
+res %>%
+  ACF(value,lag_max = 50,type = "partial") %>%
+  autoplot() +
+  labs(title="FACP sob os residuos do modelo")
+
+Box.test(fit[["fit"]][["residuals"]], lag = 50, type = "Ljung")
+
+shapiro.test(fit[["fit"]][["residuals"]])
+```
+
+Sob a hipótese nula de independência, o teste de Ljung-Box não rejeita a hipótese nula. Portanto, existem indícios de independência na série dos resíduos.
+
+Avaliando as formas da FAC, FACP e resultado do teste de Ljung-Box, aparentam haver ainda algumas correlações positivas, porém ao diferenciar a série uma ou duas vezes, essas correlações aumentaram. Logo, este modelo aparenta ser o com melhor ajuste quanto a estrutura de dados, sendo um modelo possivelmente problemático, porém ainda útil, para previsões. Além disso, o teste de Shapiro-Wilk rejeita a normalidade dos resíduos, o que é outro sinal de alerta quando formos observar as bandas de confiança
+
+```{r}
+prev = sarima.for(y,p = 0, d = 0, q = 2, P = 1, D = 0, Q = 1, S = 12,
+           n.ahead = 5, gg=TRUE, col=4,main="Previsao do modelo completo p/ 5 prox. passos") 
+```
+
+```{r}
+prev
+```
+
+```{r}
+treino = ts(y[1:513])
+teste = ts(y[514:518]) 
+```
+
+```{r}
+prev = sarima.for(treino,p = 0, d = 0, q = 2, P = 1, D = 0, Q = 1, S = 12,
+           n.ahead = 5, gg=TRUE, col=4,main="Modelo com n-5 obs, e 5 pred") 
+```
+
+```{r}
+prev$pred
+```
+
+```{r}
+MAPE = MAPE(prev$pred, as.vector(teste))
+MAPE
+```
+
+Com um MAPE = `r MAPE`, ou seja, estando acima de 50%, podemos dizer que se trata de um modelo muito ruim para modelagem preditiva, além da não normalidade dos resíduos
+
+```{r}
+prev = sarima.for(y,p = 0, d = 0, q = 2, P = 1, D = 0, Q = 1, S = 12,
+           n.ahead = 12, gg=TRUE, col=4,main="Prev do modelo para os proximos 12 passos") 
+```
+
+```{r,warning=FALSE}
+datas <- seq.Date(from = as.Date("1960-09-01"), to = as.Date("1961-08-31"), by = "months")
+
+previsoes = data.frame(datas,prev$pred,prev$se)
+colnames(previsoes) = c("data","Valores_preditos","Erro_padrao")
+
+previsoes = previsoes %>%
+  mutate(Limite_superior = Valores_preditos + (1.96 * Erro_padrao),
+         Limite_inferior = Valores_preditos - (1.96 * Erro_padrao))
+
+ggplot(previsoes, aes(x = data)) +
+  geom_line(aes(y = Valores_preditos), color = "blue", size = 1) +
+  geom_point(aes(y = Valores_preditos), color = "blue", size = 3) +
+  geom_ribbon(aes(ymin = Limite_inferior, ymax = Limite_superior), fill = "lightblue", alpha = 0.5) +
+  labs(title = "Valores preditos com banda de previsao c/ 95% de cobertura",
+       x = "",
+       y = "Valores Preditos") +
+  theme_minimal()
+```
+
+Os diagnósticos do modelo não foram cumpridos, e este é um modelo bem ruim para modelagem preditiva! Podemos dizer que é "melhor que nada", ainda assim, não deve ser levado muito a sério os resultados preditivos deste modelo parauma intervenção real.
+
+# 3. "Mean Temp (°C)";
+
+```{r}
+df3 = df[,c(5,12)]
+df3 = df3 %>% drop_na()
+colnames(df3)[2] = "mean_temp"
+```
+
+```{r}
+df3$data = as.Date(df3$data)
+df3 = tsibble::as_tsibble(df3,index=data,regular=F)
+```
+
+## Visualizando a série com uma linha suavizada
+
+```{r, warning=FALSE}
+df3 %>% 
+  plot_time_series(data,mean_temp, .interactive = F, .smooth = T)
+
+```
+
+```{r, warning=FALSE}
+FAC3 = df3 %>%
+  ACF(var = mean_temp,lag_max = 20) %>%
+  autoplot() +
+  labs(title="FAC")
+
+FACP3 = df3 %>%
+  ACF(var = mean_temp,lag_max = 20,type = "partial") %>%
+  autoplot() +
+  labs(title="FACP")
+
+grid.arrange(FAC3, FACP3, nrow = 1)
+
+```
+
+```{r}
+aTSA::adf.test(ts(df3$mean_temp), nlag = 5)
+```
+
+O teste de Dickey-Fuller sugere a estacionariedade da série
+
+```{r}
+y <- ts(df3$mean_temp)
+
+fit1 <- haRmonics(y = y,
+                  numFreq = 1,
+                  delta = 0.1)
+fit3 <- haRmonics(y = y,
+                   numFreq = 3,
+                   delta = 0.1)
+fit6 <- haRmonics(y = y,
+                    numFreq = 6,
+                    delta = 0.1)
+fit12 <- haRmonics(y = y,
+                    numFreq = 12,
+                    delta = 0.1)
+
+x = ts(fit1$fitted)
+w = ts(fit3$fitted)
+z = ts(fit6$fitted)
+v = ts(fit12$fitted)
+
+plot(y, pch = 16, main = "Previsoes de uma modelagem Harmonica")
+lines(x ,lty = 5, col = "green")
+lines(w, lty = 4, col = "red")
+lines(z, lty = 3, col = "blue")
+lines(v, lty = 2, col = "orange")
+legend("topleft", legend = c("1", "3", "6","12"),
+       col = c("green", "red", "blue","orange"), lty = c(5, 4, 3,2))
+
+```
+
+A modelagem harmônica foi satisfatória em capturar todas as estruturas da série, deixando apenas ruido branco.
+
+Visto que não foi testado se a série necessita de diferenciação, farei a modelagem sarima com ordem de sazonalidade = 12. Iniciei com grid de parâmetros p,P,q,Q,d,D no intervalo [0,2]; e o melhor modelo selecionado não tinha parâmetros na fronteira.
+
+```{r,echo=TRUE,cache=TRUE,results='hide',warning=FALSE}
+modelos <- data.frame(p = integer(),
+                      P = integer(),
+                      q = integer(),
+                      Q = integer(),
+                      d = integer(),
+                      D = integer(),
+                      AIC = numeric(),
+                      BIC = numeric())
+
+tic()
+for(p in 0:2){
+  for(P in 0:2){
+      for(q in 0:2){
+          for(Q in 0:2){
+              for(d in 0:2){
+                for(D in 0:2){
+            tryCatch({
+              fit = astsa::sarima(y, details = FALSE, Model = FALSE,
+                           p = p, d = d, q = q, P = P, D = D, Q = Q, S = 12)
+              AIC = fit$ICs[1]
+              BIC = fit$ICs[3]
+              mod = c(p, P, q, Q,d,D, AIC, BIC)
+              modelos = rbind(modelos, mod)
+            }, error = function(e) {
+            })
+        }}}}}}
+toc()
+
+colnames(modelos) = c("p","P","q","Q","d","D","AIC","BIC")
+
+modelo = modelos %>%
+  arrange(BIC, AIC) %>% head(1) 
+```
+
+Logo, o melhor modelo (minimiza BIC) é o com os parâmetros:
+
+```{r}
+kable(modelo)
+```
+
+```{r}
+fit = astsa::sarima(y,p = 1, d = 0, q = 0, P = 0, D = 1, Q = 1, S = 12)
+
+res = as_tsibble(fit[["fit"]][["residuals"]])
+
+res %>%
+  ACF(value,lag_max = 50) %>%
+  autoplot() +
+  labs(title="FAC sob os residuos do modelo")
+
+res %>%
+  ACF(value,lag_max = 50,type = "partial") %>%
+  autoplot() +
+  labs(title="FACP sob os residuos do modelo")
+
+Box.test(fit[["fit"]][["residuals"]], lag = 50, type = "Ljung")
+
+shapiro.test(fit[["fit"]][["residuals"]])
+```
+
+Sob a hipótese nula de independência, o teste de Ljung-Box não rejeita a hipótese nula. Portanto, existem indícios de independência na série dos resíduos.
+
+Avaliando as formas da FAC, FACP e resultado do teste de Ljung-Box, aparenta haver alguma correlação nos resíduos, além da rejeição da normalidade pelo teste de Shapiro-Wilk. Como já foram feitos testes de diferenciação anteriormente, este é o melhor modelo que pode se obter com este método.
+
+```{r}
+
+prev = sarima.for(y,p = 1, d = 0, q = 0, P = 0, D = 1, Q = 1, S = 12,
+           n.ahead = 5, gg=TRUE, col=4,main="Previsao do modelo completo p/ 5 prox. passos") 
+```
+
+```{r}
+prev
+```
+
+```{r}
+treino = ts(y[1:513])
+teste = ts(y[514:518]) 
+```
+
+```{r}
+prev = sarima.for(treino,p = 1, d = 0, q = 0, P = 0, D = 1, Q = 1, S = 12,
+           n.ahead = 5, gg=TRUE, col=4,main="Modelo com n-5 obs, e 5 pred") 
+```
+
+```{r}
+prev$pred
+```
+
+```{r}
+MAPE = MAPE(prev$pred, as.vector(teste))
+MAPE
+```
+
+Com um MAPE = `r MAPE`, ou seja,entre 20 e 30%, podemos dizer que se trata de um bom modelo preditivo.
+
+```{r}
+prev = sarima.for(y,p = 1, d = 0, q = 0, P = 0, D = 1, Q = 1, S = 12,
+           n.ahead = 12, gg=TRUE, col=4,main="Prev do modelo para os proximos 12 passos") 
+```
+
+```{r,warning=FALSE}
+datas <- seq.Date(from = as.Date("1960-09-01"), to = as.Date("1961-08-31"), by = "months")
+
+previsoes = data.frame(datas,prev$pred,prev$se)
+colnames(previsoes) = c("data","Valores_preditos","Erro_padrao")
+
+previsoes = previsoes %>%
+  mutate(Limite_superior = Valores_preditos + (1.96 * Erro_padrao),
+         Limite_inferior = Valores_preditos - (1.96 * Erro_padrao))
+
+ggplot(previsoes, aes(x = data)) +
+  geom_line(aes(y = Valores_preditos), color = "blue", size = 1) +
+  geom_point(aes(y = Valores_preditos), color = "blue", size = 3) +
+  geom_ribbon(aes(ymin = Limite_inferior, ymax = Limite_superior), fill = "lightblue", alpha = 0.5) +
+  labs(title = "Valores preditos com banda de previsao c/ 95% de cobertura",
+       x = "",
+       y = "Valores Preditos") +
+  theme_minimal()
+```
+
+Os diagnósticos do modelo foram todos atendidos. Portanto, as previsões deste modelo apresentam alguma credibilidade. Considerando a banda de confiança e a especificidade dos dados, temos de tomar cuidado pois os resíduos não são normais. Esta banda pode estar incorreta. Ainda assim, se trata de um modelo relevante para análises preditivas.
+
+# 4. "Extr Max Temp (°C)";
+
+```{r}
+df4 = df[,c(5,14)]
+df4 = df4 %>% drop_na()
+colnames(df4)[2]="extr_max_temp"
+```
+
+```{r}
+df4$data = as.Date(df4$data)
+df4 = tsibble::as_tsibble(df4,index=data,regular=F)
+```
+
+## Visualizando a série com uma linha suavizada
+
+```{r, warning=FALSE}
+df4 %>% 
+  plot_time_series(data,extr_max_temp, .interactive = F, .smooth = T)
+
+```
+
+```{r, warning=FALSE}
+FAC4 = df4 %>%
+  ACF(var = extr_max_temp,lag_max = 20) %>%
+  autoplot() +
+  labs(title="FAC")
+
+FACP4 = df4 %>%
+  ACF(var = extr_max_temp,lag_max = 20,type = "partial") %>%
+  autoplot() +
+  labs(title="FACP")
+
+grid.arrange(FAC4, FACP4, nrow = 1)
+
+```
+
+```{r}
+aTSA::adf.test(ts(df4$extr_max_temp), nlag = 5)
+```
+
+O teste de Dickey-Fuller sugere a estacionariedade da série
+
+```{r}
+y <- ts(df4$extr_max_temp)
+
+fit1 <- haRmonics(y = y,
+                  numFreq = 1,
+                  delta = 0.1)
+fit3 <- haRmonics(y = y,
+                   numFreq = 3,
+                   delta = 0.1)
+fit6 <- haRmonics(y = y,
+                    numFreq = 6,
+                    delta = 0.1)
+fit12 <- haRmonics(y = y,
+                    numFreq = 12,
+                    delta = 0.1)
+
+x = ts(fit1$fitted)
+w = ts(fit3$fitted)
+z = ts(fit6$fitted)
+v = ts(fit12$fitted)
+
+plot(y, pch = 16, main = "Previsoes de uma modelagem Harmonica")
+lines(x ,lty = 5, col = "green")
+lines(w, lty = 4, col = "red")
+lines(z, lty = 3, col = "blue")
+lines(v, lty = 2, col = "orange")
+legend("topleft", legend = c("1", "3", "6","12"),
+       col = c("green", "red", "blue","orange"), lty = c(5, 4, 3,2))
+
+```
+
+A modelagem harmônica foi satisfatória em capturar todas as estruturas da série, deixando apenas ruido branco.
+
+Visto que não foi testada a necessidade de diferenciação da série, farei a modelagem sarima com ordem de sazonalidade = 12, argumentos d = D = 0. Iniciei com grid de parâmetros p,P,q,Q,d,D no intervalo [0,2]; e ajustou-se o limite dos parâmetros até a convergência de um modelo ótimo sem parâmetros na fronteira.
+
+```{r,echo=TRUE,cache=TRUE,results='hide',warning=FALSE}
+modelos <- data.frame(p = integer(),
+                      P = integer(),
+                      q = integer(),
+                      Q = integer(),
+                      d = integer(),
+                      D = integer(),
+                      AIC = numeric(),
+                      BIC = numeric())
+
+tic()
+for(p in 0:3){
+  for(P in 0:1){
+      for(q in 0:4){
+          for(Q in 0:1){
+              for(d in 0:1){
+                for(D in 0:1){
+            tryCatch({
+              fit = astsa::sarima(y, details = FALSE, Model = FALSE,
+                           p = p, d = d, q = q, P = P, D = D, Q = Q, S = 12)
+              AIC = fit$ICs[1]
+              BIC = fit$ICs[3]
+              mod = c(p, P, q, Q,d,D, AIC, BIC)
+              modelos = rbind(modelos, mod)
+            }, error = function(e) {
+            })
+        }}}}}}
+toc()
+
+colnames(modelos) = c("p","P","q","Q","d","D","AIC","BIC")
+
+modelo = modelos %>%
+  arrange(BIC, AIC) %>% head(1) 
+```
+
+Logo, o melhor modelo (minimiza BIC) é o com os parâmetros:
+
+```{r}
+kable(modelo)
+```
+
+```{r}
+fit = astsa::sarima(y,p = 2,P = 1, q = 3,Q = 1,d = 0, D = 0, S = 12)
+
+res = as_tsibble(fit[["fit"]][["residuals"]])
+
+res %>%
+  ACF(value,lag_max = 20) %>%
+  autoplot() +
+  labs(title="FAC sob os residuos do modelo")
+
+res %>%
+  ACF(value,lag_max = 20,type = "partial") %>%
+  autoplot() +
+  labs(title="FACP sob os residuos do modelo")
+
+Box.test(fit[["fit"]][["residuals"]], lag = 20, type = "Ljung")
+
+shapiro.test(fit[["fit"]][["residuals"]])
+```
+
+Sob a hipótese nula de independência, o teste de Ljung-Box não rejeita a hipótese nula. Portanto, existem indícios de independência na série dos resíduos.
+
+Avaliando as formas da FAC, FACP e resultado do teste de Ljung-Box, aparenta haver alguma correlação nos resíduos, além da rejeição da normalidade pelo teste de Shapiro-Wilk. Apesar disso, o gráfico Q-Q mostra certa aderência aos quantis esperados de uma distribuição normal, salvo um outlier isolado. Como já foram feitos testes de diferenciação anteriormente, este é o melhor modelo que pode se obter com este método.
+
+```{r}
+prev = sarima.for(y,p = 2,P = 1,q = 3,Q = 1, d = 0, D = 0, S = 12,
+           n.ahead = 5, gg=TRUE, col=4,main="Previsao do modelo completo p/ 5 prox. passos") 
+```
+
+```{r}
+prev
+```
+
+```{r}
+treino = ts(y[1:509])
+teste = ts(y[510:514]) 
+```
+
+```{r}
+prev = sarima.for(treino, p = 2, P = 1, q = 3,Q = 1, d = 0, D = 0, S = 12,
+           n.ahead = 5, gg=TRUE, col=4,main="Modelo com n-5 obs, e 5 pred") 
+```
+
+```{r}
+prev$pred
+```
+
+```{r}
+MAPE = MAPE(prev$pred, as.vector(teste))
+MAPE
+```
+
+Com um MAPE = `r MAPE`, ou seja,entre 10 e 20%, podemos dizer que se trata de um excelente modelo preditivo.
+
+```{r}
+prev = sarima.for(y, p = 2, P = 1, q = 3,Q = 1, d = 0, D = 0, S = 12,
+           n.ahead = 12, gg=TRUE, col=4,main="Prev do modelo para os proximos 12 passos") 
+```
+
+```{r,warning=FALSE}
+datas <- seq.Date(from = as.Date("1960-09-01"), to = as.Date("1961-08-31"), by = "months")
+
+previsoes = data.frame(datas,prev$pred,prev$se)
+colnames(previsoes) = c("data","Valores_preditos","Erro_padrao")
+
+previsoes = previsoes %>%
+  mutate(Limite_superior = Valores_preditos + (1.96 * Erro_padrao),
+         Limite_inferior = Valores_preditos - (1.96 * Erro_padrao))
+
+ggplot(previsoes, aes(x = data)) +
+  geom_line(aes(y = Valores_preditos), color = "blue", size = 1) +
+  geom_point(aes(y = Valores_preditos), color = "blue", size = 3) +
+  geom_ribbon(aes(ymin = Limite_inferior, ymax = Limite_superior), fill = "lightblue", alpha = 0.5) +
+  labs(title = "Valores preditos com banda de previsao c/ 95% de cobertura",
+       x = "",
+       y = "Valores Preditos") +
+  theme_minimal()
+```
+
+Alguns diagnósticos do modelo foram parcialmente todos atendidos. Portanto, as previsões deste modelo apresentam alguma credibilidade. Considerando a banda de confiança e a especificidade dos dados, temos de tomar cuidado pois os resíduos não são normais. Esta banda pode estar incorreta, apesar da fuga da normalidade aparentar ser ligeira pelo gráfico Q-Q. Ainda assim, se trata de um modelo relevante para análises preditivas.
+
+# 5. "Extr Min Temp (°C)";
+
+```{r}
+df5 = df[,c(5,16)]
+df5 = df5 %>% drop_na()
+colnames(df5)[2]="extr_min_temp"
+```
+
+```{r}
+df5$data = as.Date(df5$data)
+df5 = tsibble::as_tsibble(df5,index=data,regular=F)
+```
+
+## Visualizando a série com uma linha suavizada
+
+```{r, warning=FALSE}
+df5 %>% 
+  plot_time_series(data,extr_min_temp, .interactive = F, .smooth = T)
+
+```
+
+```{r, warning=FALSE}
+FAC5 = df5 %>%
+  ACF(var = extr_min_temp,lag_max = 20) %>%
+  autoplot() +
+  labs(title="FAC")
+
+FACP5 = df5 %>%
+  ACF(var = extr_min_temp,lag_max = 20,type = "partial") %>%
+  autoplot() +
+  labs(title="FACP")
+
+grid.arrange(FAC5, FACP5, nrow = 1)
+
+```
+
+```{r}
+aTSA::adf.test(ts(df5$extr_min_temp), nlag = 5)
+```
+
+O teste de Dickey-Fuller sugere a estacionariedade da série
+
+```{r}
+y <- ts(df5$extr_min_temp)
+
+fit1 <- haRmonics(y = y,
+                  numFreq = 1,
+                  delta = 0.1)
+fit3 <- haRmonics(y = y,
+                   numFreq = 3,
+                   delta = 0.1)
+fit6 <- haRmonics(y = y,
+                    numFreq = 6,
+                    delta = 0.1)
+fit12 <- haRmonics(y = y,
+                    numFreq = 12,
+                    delta = 0.1)
+
+x = ts(fit1$fitted)
+w = ts(fit3$fitted)
+z = ts(fit6$fitted)
+v = ts(fit12$fitted)
+
+plot(y, pch = 16, main = "Previsoes de uma modelagem Harmonica")
+lines(x ,lty = 5, col = "green")
+lines(w, lty = 4, col = "red")
+lines(z, lty = 3, col = "blue")
+lines(v, lty = 2, col = "orange")
+legend("topleft", legend = c("1", "3", "6","12"),
+       col = c("green", "red", "blue","orange"), lty = c(5, 4, 3,2))
+
+```
+
+A modelagem harmônica foi satisfatória em capturar todas as estruturas da série, deixando apenas ruido branco.
+
+Visto que não foi testada a necessidade de diferenciação da série, farei a modelagem sarima com ordem de sazonalidade = 12, argumentos d = D = 0. Iniciei com grid de parâmetros p,P,q,Q,d,D no intervalo [0,2]; e ajustou-se o limite dos parâmetros até a convergência de um modelo ótimo sem parâmetros na fronteira.
+
+```{r,echo=TRUE,cache=TRUE,results='hide',warning=FALSE}
+modelos <- data.frame(p = integer(),
+                      P = integer(),
+                      q = integer(),
+                      Q = integer(),
+                      d = integer(),
+                      D = integer(),
+                      AIC = numeric(),
+                      BIC = numeric())
+
+tic()
+for(p in 0:4){
+  for(P in 0:2){
+      for(q in 0:3){
+          for(Q in 0:2){
+              for(d in 0:1){
+                for(D in 0:1){
+            tryCatch({
+              fit = astsa::sarima(y, details = FALSE, Model = FALSE,
+                           p = p, d = d, q = q, P = P, D = D, Q = Q, S = 12)
+              AIC = fit$ICs[1]
+              BIC = fit$ICs[3]
+              mod = c(p, P, q, Q,d,D, AIC, BIC)
+              modelos = rbind(modelos, mod)
+            }, error = function(e) {
+            })
+        }}}}}}
+toc()
+
+colnames(modelos) = c("p","P","q","Q","d","D","AIC","BIC")
+
+modelo = modelos %>%
+  arrange(BIC, AIC) %>% head(1) 
+```
+
+Logo, o melhor modelo (minimiza BIC) é o com os parâmetros:
+
+```{r}
+kable(modelo)
+```
+
+```{r}
+fit = astsa::sarima(y,p = 3,P = 1, q = 2,Q = 1,d = 0, D = 0, S = 12)
+
+res = as_tsibble(fit[["fit"]][["residuals"]])
+
+res %>%
+  ACF(value,lag_max = 20) %>%
+  autoplot() +
+  labs(title="FAC sob os residuos do modelo")
+
+res %>%
+  ACF(value,lag_max = 20,type = "partial") %>%
+  autoplot() +
+  labs(title="FACP sob os residuos do modelo")
+
+Box.test(fit[["fit"]][["residuals"]], lag = 20, type = "Ljung")
+
+shapiro.test(fit[["fit"]][["residuals"]])
+```
+
+Sob a hipótese nula de independência, o teste de Ljung-Box não rejeita a hipótese nula a 5%, porém numa fronteira próxima à rejeição. Portanto, existem indícios de independência na série dos resíduos, ainda que não tão fortes.
+
+Avaliando as formas da FAC, FACP e resultado do teste de Ljung-Box, aparenta haver alguma correlação nos resíduos, além de uma acentuada fuga da normalidade dos resíduos, tanto pelo teste de Shapiro-WWilk, quanto pelo gráfico Q-Q. Como já foram feitos testes de diferenciação anteriormente, este é o melhor modelo que pode se obter com este método.
+
+```{r}
+prev = sarima.for(y,p = 3,P = 1,q = 2,Q = 1, d = 0, D = 0, S = 12,
+           n.ahead = 5, gg=TRUE, col=4,main="Previsao do modelo completo p/ 5 prox. passos") 
+```
+
+```{r}
+prev
+```
+
+```{r}
+treino = ts(y[1:508])
+teste = ts(y[509:513]) 
+```
+
+```{r}
+prev = sarima.for(treino, p = 3, P = 1, q = 2,Q = 1, d = 0, D = 0, S = 12,
+           n.ahead = 5, gg=TRUE, col=4,main="Modelo com n-5 obs, e 5 pred") 
+```
+
+```{r}
+prev$pred
+```
+
+```{r}
+MAPE = MLmetrics::MAPE(prev$pred, as.vector(teste))
+MAPE
+
+# Pseudo-MAPE
+set.seed(150167636)
+teste[3] <- rnorm(1)
+MAPE = MAPE(prev$pred, as.vector(teste))
+MAPE
+```
+
+Não foi possível calcular um MAPE para este conjunto, visto que uma das observações era igual à zero, e isso retorna um MAPE infinito por conta da divisão por zero. Calculando um "pseudo-MAPE" (ou seja, incluí um ruído aleatório na observação para que deixasse de ser zero) para assim ser possível obter algum valor; ainda assim o valor retornado foi `r MAPE`, o que não faz muito sentido.
+
+```{r}
+prev = sarima.for(y, p = 3, P = 1, q = 2,Q = 1, d = 0, D = 0, S = 12,
+           n.ahead = 12, gg=TRUE, col=4,main="Prev do modelo para os proximos 12 passos") 
+```
+
+```{r,warning=FALSE}
+datas <- seq.Date(from = as.Date("1960-09-01"), to = as.Date("1961-08-31"), by = "months")
+
+previsoes = data.frame(datas,prev$pred,prev$se)
+colnames(previsoes) = c("data","Valores_preditos","Erro_padrao")
+
+previsoes = previsoes %>%
+  mutate(Limite_superior = Valores_preditos + (1.96 * Erro_padrao),
+         Limite_inferior = Valores_preditos - (1.96 * Erro_padrao))
+
+ggplot(previsoes, aes(x = data)) +
+  geom_line(aes(y = Valores_preditos), color = "blue", size = 1) +
+  geom_point(aes(y = Valores_preditos), color = "blue", size = 3) +
+  geom_ribbon(aes(ymin = Limite_inferior, ymax = Limite_superior), fill = "lightblue", alpha = 0.5) +
+  labs(title = "Valores preditos com banda de previsao c/ 95% de cobertura",
+       x = "",
+       y = "Valores Preditos") +
+  theme_minimal()
+```
+
+Quase todos os diagnósticos do modelo foram rejeitados. A fuga da normalidade é extremamente acentuada. Sequer foi possível calcular um MAPE. Este modelo não é nem um pouco confiável para previsões. A indicação é não utilizá-lo, e buscar alguma modelagem mais sofisticada para entender o fenômeno desta variável, ainda que visualmente a previsão tenha o comportamento senoidal aproximado da série registrada.
+
+
+# 6. "Total Rain (mm)";
+
+```{r}
+df6 = df[,c(5,18)]
+df6 = df6 %>% drop_na()
+colnames(df6)[2]="total_rain"
+```
+
+```{r}
+df6$data = as.Date(df6$data)
+df6 = tsibble::as_tsibble(df6,index=data,regular=F)
+```
+
+## Visualizando a série com uma linha suavizada
+
+```{r, warning=FALSE}
+df6 %>% 
+  plot_time_series(data,total_rain, .interactive = F, .smooth = T)
+
+```
+
+```{r, warning=FALSE}
+FAC6 = df6 %>%
+  ACF(var = total_rain,lag_max = 20) %>%
+  autoplot() +
+  labs(title="FAC")
+
+FACP6 = df6 %>%
+  ACF(var = total_rain,lag_max = 20,type = "partial") %>%
+  autoplot() +
+  labs(title="FACP")
+
+grid.arrange(FAC6, FACP6, nrow = 1)
+
+```
+
+```{r}
+aTSA::adf.test(ts(df6$total_rain), nlag = 10)
+```
+
+O teste de Dickey-Fuller sugere a estacionariedade da série
+
+```{r}
+y <- ts(df6$total_rain)
+
+fit1 <- haRmonics(y = y,
+                  numFreq = 1,
+                  delta = 0.1)
+fit3 <- haRmonics(y = y,
+                   numFreq = 3,
+                   delta = 0.1)
+fit6 <- haRmonics(y = y,
+                    numFreq = 6,
+                    delta = 0.1)
+fit12 <- haRmonics(y = y,
+                    numFreq = 12,
+                    delta = 0.1)
+
+x = ts(fit1$fitted)
+w = ts(fit3$fitted)
+z = ts(fit6$fitted)
+v = ts(fit12$fitted)
+
+plot(y, pch = 16, main = "Previsoes de uma modelagem Harmonica")
+lines(x ,lty = 5, col = "green")
+lines(w, lty = 4, col = "red")
+lines(z, lty = 3, col = "blue")
+lines(v, lty = 2, col = "orange")
+legend("topleft", legend = c("1", "3", "6","12"),
+       col = c("green", "red", "blue","orange"), lty = c(5, 4, 3,2))
+
+```
+
+A modelagem harmônica foi satisfatória em capturar todas as estruturas da série, deixando apenas ruido branco.
+
+Visto que não foi testada a necessidade de diferenciação da série, farei a modelagem sarima com ordem de sazonalidade = 12, argumentos d = D = 0. Iniciei com grid de parâmetros p,P,q,Q,d,D no intervalo [0,2]; e ajustou-se o limite dos parâmetros até a convergência de um modelo ótimo sem parâmetros na fronteira.
+
+```{r,echo=TRUE,cache=TRUE,results='hide',warning=FALSE}
+modelos <- data.frame(p = integer(),
+                      P = integer(),
+                      q = integer(),
+                      Q = integer(),
+                      d = integer(),
+                      D = integer(),
+                      AIC = numeric(),
+                      BIC = numeric())
+
+tic()
+for(p in 0:3){
+  for(P in 0:2){
+      for(q in 0:3){
+          for(Q in 0:2){
+              for(d in 0:0){
+                for(D in 0:0){
+            tryCatch({
+              fit = astsa::sarima(y, details = FALSE, Model = FALSE,
+                           p = p, d = d, q = q, P = P, D = D, Q = Q, S = 12)
+              AIC = fit$ICs[1]
+              BIC = fit$ICs[3]
+              mod = c(p, P, q, Q,d,D, AIC, BIC)
+              modelos = rbind(modelos, mod)
+            }, error = function(e) {
+            })
+        }}}}}}
+toc()
+
+colnames(modelos) = c("p","P","q","Q","d","D","AIC","BIC")
+
+modelo = modelos %>%
+  arrange(BIC, AIC) %>% head(1) 
+```
+
+Logo, o melhor modelo (minimiza BIC) é o com os parâmetros:
+
+```{r}
+kable(modelo)
+```
+
+```{r}
+fit = astsa::sarima(y,p = 2,P = 1, q = 2,Q = 1,d = 0, D = 0, S = 12)
+
+res = as_tsibble(fit[["fit"]][["residuals"]])
+
+res %>%
+  ACF(value,lag_max = 20) %>%
+  autoplot() +
+  labs(title="FAC sob os residuos do modelo")
+
+res %>%
+  ACF(value,lag_max = 20,type = "partial") %>%
+  autoplot() +
+  labs(title="FACP sob os residuos do modelo")
+
+Box.test(fit[["fit"]][["residuals"]], lag = 20, type = "Ljung")
+
+shapiro.test(fit[["fit"]][["residuals"]])
+```
+
+Sob a hipótese nula de independência, o teste de Ljung-Box rejeita a hipótese nula. Portanto, não existem indícios de independência na série dos resíduos.
+
+Avaliando as formas da FAC, FACP e resultado do teste de Ljung-Box, aparenta pouca ou nenhuma correlação nos resíduos, além da rejeição da normalidade pelo teste de Shapiro-Wilk, confirmando visualmente pelo Q-Q com uma forte fuga à normalidade. Como já foram feitos testes de diferenciação anteriormente, este é o melhor modelo que pode se obter com este método.
+
+```{r}
+prev = sarima.for(y,p = 2,P = 1,q = 2,Q = 1, d = 0, D = 0, S = 12,
+           n.ahead = 5, gg=TRUE, col=4,main="Previsao do modelo completo p/ 5 prox. passos") 
+```
+
+```{r}
+prev
+```
+
+```{r}
+treino = ts(y[1:508])
+teste = ts(y[509:513]) 
+```
+
+```{r}
+prev = sarima.for(treino, p = 2, P = 1, q = 2,Q = 1, d = 0, D = 0, S = 12,
+           n.ahead = 5, gg=TRUE, col=4,main="Modelo com n-5 obs, e 5 pred") 
+```
+
+```{r}
+prev$pred
+```
+
+```{r}
+MAPE = MAPE(prev$pred, as.vector(teste))
+MAPE
+```
+
+Com um MAPE = `r MAPE`, ou seja,entre 20 e 30%, podemos dizer que se trata de um bom modelo preditivo.
+
+```{r}
+prev = sarima.for(y, p = 2, P = 1, q = 3,Q = 1, d = 0, D = 0, S = 12,
+           n.ahead = 12, gg=TRUE, col=4,main="Prev do modelo para os proximos 12 passos") 
+```
+
+```{r,warning=FALSE}
+datas <- seq.Date(from = as.Date("1960-09-01"), to = as.Date("1961-08-31"), by = "months")
+
+previsoes = data.frame(datas,prev$pred,prev$se)
+colnames(previsoes) = c("data","Valores_preditos","Erro_padrao")
+
+previsoes = previsoes %>%
+  mutate(Limite_superior = Valores_preditos + (1.96 * Erro_padrao),
+         Limite_inferior = Valores_preditos - (1.96 * Erro_padrao))
+
+ggplot(previsoes, aes(x = data)) +
+  geom_line(aes(y = Valores_preditos), color = "blue", size = 1) +
+  geom_point(aes(y = Valores_preditos), color = "blue", size = 3) +
+  geom_ribbon(aes(ymin = Limite_inferior, ymax = Limite_superior), fill = "lightblue", alpha = 0.5) +
+  labs(title = "Valores preditos com banda de previsao c/ 95% de cobertura",
+       x = "",
+       y = "Valores Preditos") +
+  theme_minimal()
+```
+
+Grande parte dos pressupostos do modelo não foram atendidos. A fuga da normalidade é bastante acentuada, levando a banda de confiança não ser tão confiável assim. Ainda assim, o MAPE do modelo é relativamente baixo, e a estrutura visual da série comparada a suas previsões aparentam ser suaves. Logo, este pode ser um modelo útil para previsões, ainda que seus resultados devam ser observados com criticidade, visto que os pressupostos necessários não foram atendidos.
+
+# 7. "Total Snow (cm)";
+
+```{r}
+df7 = df[,c(5,20)]
+df7 = df7[4:513,]
+df7 = df7 %>% drop_na()
+colnames(df7)[2]="total_snow"
+```
+
+```{r}
+df7$data = as.Date(df7$data)
+df7 = tsibble::as_tsibble(df7,index=data,regular=F)
+```
+
+## Visualizando a série com uma linha suavizada
+
+```{r, warning=FALSE}
+df7 %>% 
+  plot_time_series(data,total_snow, .interactive = F, .smooth = T)
+
+```
+
+```{r, warning=FALSE}
+FAC7 = df7 %>%
+  ACF(var = total_snow,lag_max = 20) %>%
+  autoplot() +
+  labs(title="FAC")
+
+FACP7 = df7 %>%
+  ACF(var = total_snow,lag_max = 20,type = "partial") %>%
+  autoplot() +
+  labs(title="FACP")
+
+grid.arrange(FAC7, FACP7, nrow = 1)
+
+```
+
+```{r}
+aTSA::adf.test(ts(df7$total_snow), nlag = 20)
+```
+
+O teste de Dickey-Fuller sugere a estacionariedade da série até um lag = 10.
+
+```{r}
+y <- ts(df7$total_snow)
+
+fit1 <- haRmonics(y = y,
+                  numFreq = 1,
+                  delta = 0.1)
+fit3 <- haRmonics(y = y,
+                   numFreq = 3,
+                   delta = 0.1)
+fit6 <- haRmonics(y = y,
+                    numFreq = 6,
+                    delta = 0.1)
+fit12 <- haRmonics(y = y,
+                    numFreq = 12,
+                    delta = 0.1)
+
+x = ts(fit1$fitted)
+w = ts(fit3$fitted)
+z = ts(fit6$fitted)
+v = ts(fit12$fitted)
+
+plot(y, pch = 16, main = "Previsoes de uma modelagem Harmonica")
+lines(x ,lty = 5, col = "green")
+lines(w, lty = 4, col = "red")
+lines(z, lty = 3, col = "blue")
+lines(v, lty = 2, col = "orange")
+legend("topleft", legend = c("1", "3", "6","12"),
+       col = c("green", "red", "blue","orange"), lty = c(5, 4, 3,2))
+
+```
+
+A modelagem harmônica foi satisfatória em capturar todas as estruturas da série, deixando apenas ruido branco.
+
+Esta série parece ter sazonalidade semestral. Olhando os dados, a cada 6 meses o registro ou zera por 6 meses, ou é estritamente positivo por 6 meses, antes de zerar por 6 meses e assim por diante. Faz sentido quanto ao conjunto de dados: Se trata de precipitação de gelo, que deve ocorrer somente em duas estações do ano (Outono e Inverno?). Como os dados iniciam com 3 observações = 0, para depois ocorrer a semestralidade, resolvi remover as 3 primeiras observações, para evitar problemas na modelagem quanto ao reconhecimento do padrão semestral ante aos 3 primeiros dados (se fosse para chutar, os 3 meses anteriores aos primeiros dados também são = 0).
+
+Visto que não foi testada a necessidade de diferenciação da série, farei a modelagem sarima com ordem de sazonalidade = 6, argumentos d = D = 0. Iniciei com grid de parâmetros p,P,q,Q,d,D no intervalo [0,2]; e ajustou-se o limite dos parâmetros até a convergência de um modelo ótimo sem parâmetros na fronteira.
+
+```{r,echo=TRUE,cache=TRUE,results='hide',warning=FALSE}
+modelos <- data.frame(p = integer(),
+                      P = integer(),
+                      q = integer(),
+                      Q = integer(),
+                      d = integer(),
+                      D = integer(),
+                      AIC = numeric(),
+                      BIC = numeric())
+
+tic()
+for(p in 0:6){
+  for(P in 0:2){
+      for(q in 0:6){
+          for(Q in 0:2){
+              for(d in 0:0){
+                for(D in 0:0){
+            tryCatch({
+              fit = astsa::sarima(y, details = FALSE, Model = FALSE,
+                           p = p, d = d, q = q, P = P, D = D, Q = Q, S = 6)
+              AIC = fit$ICs[1]
+              BIC = fit$ICs[3]
+              mod = c(p, P, q, Q,d,D, AIC, BIC)
+              modelos = rbind(modelos, mod)
+            }, error = function(e) {
+            })
+        }}}}}}
+toc()
+
+colnames(modelos) = c("p","P","q","Q","d","D","AIC","BIC")
+
+modelo = modelos %>%
+  arrange(BIC, AIC) %>% head(1) 
+```
+
+Logo, o melhor modelo (minimiza BIC) é o com os parâmetros:
+
+```{r}
+kable(modelo)
+```
+
+```{r}
+fit = astsa::sarima(y,p = 5,P = 1, q = 5,Q = 1,d = 0, D = 0, S = 6)
+
+res = as_tsibble(fit[["fit"]][["residuals"]])
+
+res %>%
+  ACF(value,lag_max = 20) %>%
+  autoplot() +
+  labs(title="FAC sob os residuos do modelo")
+
+res %>%
+  ACF(value,lag_max = 20,type = "partial") %>%
+  autoplot() +
+  labs(title="FACP sob os residuos do modelo")
+
+Box.test(fit[["fit"]][["residuals"]], lag = 20, type = "Ljung")
+
+shapiro.test(fit[["fit"]][["residuals"]])
+```
+
+Sob a hipótese nula de independência, o teste de Ljung-Box rejeita não a hipótese nula. Portanto, existem indícios de independência na série dos resíduos.
+
+Avaliando as formas da FAC, FACP e resultado do teste de Ljung-Box, não aparenta haver correlação nos resíduos, entretanto a rejeição da normalidade pelo teste de Shapiro-Wilk e gráfico Q-Q foi bastante acentuada. Como já foram feitos testes de diferenciação anteriormente, este é o melhor modelo que pode se obter com este método.
+
+```{r}
+prev = sarima.for(y,p = 5,P = 1,q = 5,Q = 1, d = 0, D = 0, S = 6,
+           n.ahead = 5, gg=TRUE, col=4,main="Previsao do modelo completo p/ 5 prox. passos") 
+```
+
+```{r}
+prev
+```
+
+```{r}
+treino = ts(y[1:498])
+teste = ts(y[499:503]) 
+```
+
+```{r}
+prev = sarima.for(treino, p = 5, P = 1, q = 5,Q = 1, d = 0, D = 0, S = 6,
+           n.ahead = 5, gg=TRUE, col=4,main="Modelo com n-5 obs, e 5 pred") 
+```
+
+```{r}
+prev$pred
+```
+
+```{r}
+MAPE = MAPE(prev$pred, as.vector(teste))
+MAPE
+```
+O MAPE retorna infinito, pois as previsões retornam valores negativos, o que não faz sentido com os dados. Estamos trabalhando com precipitação de neve, portanto o menor valor possível é zero. As previsões até capturam a estrutura da série, mas ultrapassando a barreira do zero, o que torna esses valores sem sentido.
+
+```{r}
+prev = sarima.for(y, p = 5, P = 1, q = 5,Q = 1, d = 0, D = 0, S = 6,
+           n.ahead = 12, gg=TRUE, col=4,main="Prev do modelo para os proximos 12 passos") 
+```
+
+```{r,warning=FALSE}
+datas <- seq.Date(from = as.Date("1960-09-01"), to = as.Date("1961-08-31"), by = "months")
+
+previsoes = data.frame(datas,prev$pred,prev$se)
+colnames(previsoes) = c("data","Valores_preditos","Erro_padrao")
+
+previsoes = previsoes %>%
+  mutate(Limite_superior = Valores_preditos + (1.96 * Erro_padrao),
+         Limite_inferior = Valores_preditos - (1.96 * Erro_padrao))
+
+ggplot(previsoes, aes(x = data)) +
+  geom_line(aes(y = Valores_preditos), color = "blue", size = 1) +
+  geom_point(aes(y = Valores_preditos), color = "blue", size = 3) +
+  geom_ribbon(aes(ymin = Limite_inferior, ymax = Limite_superior), fill = "lightblue", alpha = 0.5) +
+  labs(title = "Valores preditos com banda de previsao c/ 95% de cobertura",
+       x = "",
+       y = "Valores Preditos") +
+  theme_minimal()
+```
+
+Este modelo deve ser explicado com bastante rigor. Os valores preditos não fazem sentido, visto que a precipitação de neve só poderia ocorrer no intervalo (0,+inf]; não fazendo sentido se falar em precipitação negativa. Este modelo faz previsões negativas, o que não tem interpretação na realidade. Se arredondarmos para zero todos os valores negativos, este modelo começa a fazer algum sentido, visto que captura a estrutura sazonal da série e para os meses de precipitação, aparenta fazer algum sentido os valores previstos. A normalidade dos resíduos utilizada para a banda de credibilidade também aparentam não a seguir por conta da inflação de zeros justamente, mas talvez tenham alguma serventia para os meses com precipitação positiva. Parece ser um modelo "melhor que nada", com alguma credibilidade para os níveis de precipitação nos meses que se espera precipitação. No entando, um outro modelo com distribuição de probabilidade com mais suporte no zero, e imagem no intervalo (0,+inf] (Poisson; Binomial negativa, Qui-quadrado...) Podem fazer mais sentido que este modelo com suposições de normalidade.
+
+# 8. "Total Precip (mm)".
+
+```{r}
+df8 = df[,c(5,22)]
+df8 = df8 %>% drop_na()
+colnames(df8)[2]="total_precip"
+```
+
+```{r}
+df8$data = as.Date(df8$data)
+df8 = tsibble::as_tsibble(df8,index=data,regular=F)
+```
+
+## Visualizando a série com uma linha suavizada
+
+```{r, warning=FALSE}
+df8 %>% 
+  plot_time_series(data,total_precip, .interactive = F, .smooth = T)
+
+```
+
+```{r, warning=FALSE}
+FAC8 = df8 %>%
+  ACF(var = total_precip,lag_max = 20) %>%
+  autoplot() +
+  labs(title="FAC")
+
+FACP8 = df8 %>%
+  ACF(var = total_precip,lag_max = 20,type = "partial") %>%
+  autoplot() +
+  labs(title="FACP")
+
+grid.arrange(FAC8, FACP8, nrow = 1)
+
+```
+
+```{r}
+aTSA::adf.test(ts(df8$total_precip), nlag = 15)
+```
+
+O teste de Dickey-Fuller sugere a estacionariedade da série até lag = 5.
+
+```{r}
+y <- ts(df8$total_precip)
+
+fit1 <- haRmonics(y = y,
+                  numFreq = 1,
+                  delta = 0.1)
+fit3 <- haRmonics(y = y,
+                   numFreq = 3,
+                   delta = 0.1)
+fit6 <- haRmonics(y = y,
+                    numFreq = 6,
+                    delta = 0.1)
+fit12 <- haRmonics(y = y,
+                    numFreq = 12,
+                    delta = 0.1)
+
+x = ts(fit1$fitted)
+w = ts(fit3$fitted)
+z = ts(fit6$fitted)
+v = ts(fit12$fitted)
+
+plot(y, pch = 16, main = "Previsoes de uma modelagem Harmonica")
+lines(x ,lty = 5, col = "green")
+lines(w, lty = 4, col = "red")
+lines(z, lty = 3, col = "blue")
+lines(v, lty = 2, col = "orange")
+legend("topleft", legend = c("1", "3", "6","12"),
+       col = c("green", "red", "blue","orange"), lty = c(5, 4, 3,2))
+
+```
+
+A modelagem harmônica foi satisfatória em capturar todas as estruturas da série, deixando apenas ruido branco.
+
+Visto que não foi testada a necessidade de diferenciação da série, farei a modelagem sarima com ordem de sazonalidade = 12, argumentos d = D = 0. Iniciei com grid de parâmetros p,P,q,Q,d,D no intervalo [0,2]; e ajustou-se o limite dos parâmetros até a convergência de um modelo ótimo sem parâmetros na fronteira.
+
+```{r,echo=TRUE,cache=TRUE,results='hide',warning=FALSE}
+modelos <- data.frame(p = integer(),
+                      P = integer(),
+                      q = integer(),
+                      Q = integer(),
+                      d = integer(),
+                      D = integer(),
+                      AIC = numeric(),
+                      BIC = numeric())
+
+tic()
+for(p in 0:2){
+  for(P in 0:2){
+      for(q in 0:2){
+          for(Q in 0:2){
+              for(d in 0:2){
+                for(D in 0:2){
+            tryCatch({
+              fit = astsa::sarima(y, details = FALSE, Model = FALSE,
+                           p = p, d = d, q = q, P = P, D = D, Q = Q, S = 12)
+              AIC = fit$ICs[1]
+              BIC = fit$ICs[3]
+              mod = c(p, P, q, Q,d,D, AIC, BIC)
+              modelos = rbind(modelos, mod)
+            }, error = function(e) {
+            })
+        }}}}}}
+toc()
+
+colnames(modelos) = c("p","P","q","Q","d","D","AIC","BIC")
+
+modelo = modelos %>%
+  arrange(BIC, AIC) %>% head(1) 
+```
+
+Logo, o melhor modelo (minimiza BIC) é o com os parâmetros:
+
+```{r}
+kable(modelo)
+```
+
+```{r}
+fit = astsa::sarima(y,p = 1,P = 0, q = 0,Q = 0,d = 0, D = 0, S = 12)
+
+res = as_tsibble(fit[["fit"]][["residuals"]])
+
+res %>%
+  ACF(value,lag_max = 20) %>%
+  autoplot() +
+  labs(title="FAC sob os residuos do modelo")
+
+res %>%
+  ACF(value,lag_max = 20,type = "partial") %>%
+  autoplot() +
+  labs(title="FACP sob os residuos do modelo")
+
+Box.test(fit[["fit"]][["residuals"]], lag = 20, type = "Ljung")
+
+shapiro.test(fit[["fit"]][["residuals"]])
+```
+
+Sob a hipótese nula de independência, o teste de Ljung-Box rejeita a hipótese nula. Portanto, não existem fortes indícios de independência na série dos resíduos.
+
+Avaliando as formas da FAC, FACP e resultado do teste de Ljung-Box, aparenta haver alguma correlação nos resíduos, além da forte rejeição da normalidade pelo teste de Shapiro-Wilk e gráfico Q-Q. Como já foram feitos testes de diferenciação anteriormente, este é o melhor modelo que pode se obter com este método.
+
+```{r}
+prev = sarima.for(y,p = 1,P = 0,q = 0,Q = 0, d = 0, D = 0, S = 12,
+           n.ahead = 5, gg=TRUE, col=4,main="Previsao do modelo completo p/ 5 prox. passos") 
+```
+
+```{r}
+prev
+```
+
+```{r}
+treino = ts(y[1:508])
+teste = ts(y[509:513]) 
+```
+
+```{r}
+prev = sarima.for(treino, p = 1, P = 0, q = 0,Q = 0, d = 0, D = 0, S = 12,
+           n.ahead = 5, gg=TRUE, col=4,main="Modelo com n-5 obs, e 5 pred") 
+```
+
+```{r}
+prev$pred
+```
+
+```{r}
+MAPE = MAPE(prev$pred, as.vector(teste))
+MAPE
+```
+
+Com um MAPE = `r MAPE`, ou seja, acima de 80%, este é um modelo péssimo para previsões.
+
+```{r}
+prev = sarima.for(y, p = 1, P = 0, q = 0,Q = 0, d = 0, D = 0, S = 12,
+           n.ahead = 12, gg=TRUE, col=4,main="Prev do modelo para os proximos 12 passos") 
+```
+
+```{r,warning=FALSE}
+datas <- seq.Date(from = as.Date("1960-09-01"), to = as.Date("1961-08-31"), by = "months")
+
+previsoes = data.frame(datas,prev$pred,prev$se)
+colnames(previsoes) = c("data","Valores_preditos","Erro_padrao")
+
+previsoes = previsoes %>%
+  mutate(Limite_superior = Valores_preditos + (1.96 * Erro_padrao),
+         Limite_inferior = Valores_preditos - (1.96 * Erro_padrao))
+
+ggplot(previsoes, aes(x = data)) +
+  geom_line(aes(y = Valores_preditos), color = "blue", size = 1) +
+  geom_point(aes(y = Valores_preditos), color = "blue", size = 3) +
+  geom_ribbon(aes(ymin = Limite_inferior, ymax = Limite_superior), fill = "lightblue", alpha = 0.5) +
+  labs(title = "Valores preditos com banda de previsao c/ 95% de cobertura",
+       x = "",
+       y = "Valores Preditos") +
+  theme_minimal()
+```
+
+Este modelo não consegue diferenciar a série de um ruído branco, e só gera previsões em torno de uma média, utilizando de uma banda de credibilidade sem atendimento da normalidade dos resíduos. Em outras palavras, é um péssimo modelo para previsões, e que pode ser substituido por uma média da série para prever o próximo valor sem grandes diferenças. Portanto, necessita de um diagnóstico mais profunda, possivelmente utilizando outra técnica de modelagem de séries temporais para ajustar previsões coerentes com a realidade dos dados.
+

@@ -1,0 +1,451 @@
+---
+title: ''
+author: ''
+date: ''
+output:
+  pdf_document:
+    latex_engine: xelatex
+  fig_crop: no
+  html_document:
+    df_print: paged
+subtitle: ''
+highlight: tango
+number_sections: no
+fig_caption: yes
+keep_tex: yes
+includes:
+  in_header: Estilo.sty
+classoption: a4paper
+always_allow_html: yes
+---
+  
+  
+\begin{center}
+{\Large
+  DEPARTAMENTO DE ESTATÍSTICA} \\ [0.5cm]
+\begin{figure}[!t]
+\centering
+\includegraphics[width=9cm, keepaspectratio]{logo-UnB.eps}
+\end{figure} 
+{\large
+  `r format(Sys.time(), '%d %B %Y')`} \\[0.5cm]
+{\LARGE
+  \textbf{Lista 5}} \\ [0.5cm]
+{\Large
+  Prof. Dr. Raul Yukihiro Matsushita} \\ [0.5cm]
+{\Large
+  Aluno: Bruno Gondim Toledo} \\ [0.5cm]
+{\Large
+  Matrícula: 15/0167636} \\ [0.5cm]
+{\Large
+  Análise de séries temporais} \\ [0.5cm]
+{\Large
+  1º/2024} \\[0.5cm]
+\end{center}
+
+\newpage
+
+```{r setup, include=F}
+source("source/source.R")
+pacman::p_load(tidyverse, openxlsx, forecast, modeltime, parsnip, rsample,
+               timetk, xts, tidyquant, feasts, prophet,readxl,knitr,aTSA,
+               geoTS,astsa,purrr,tictoc,nortest,MLmetrics)
+df <- read_excel("../arquivos/listas/lista5/ConsumoEnergiaEAgua_New.xlsx")
+```
+
+# Questão 1
+
+Calculando $Y_t$
+
+```{r}
+dados = df |> dplyr::select(mes, Energia, Dias) |>
+  mutate(Yt = Energia/Dias) 
+kable(head(dados))
+```
+
+# Questão 2
+
+## Visualizando a série
+
+```{r, warning=FALSE}
+dados %>%
+  ggplot() +
+  geom_line(aes(x=mes,y=Yt)) + theme_minimal()
+
+```
+
+## Passando uma linha suavizada com auxílio do pacote *timetk* para verificação visual de tendência
+
+```{r, warning=FALSE}
+dados %>%
+  plot_time_series(mes, Yt, .interactive = F, .smooth = T)
+```
+
+Com o auxílio visual dos gráficos, podemos tirar algumas conclusões exploratórias. Os dados se referem ao consumo médio diário registrado de julho de 1997 até setembro de 2024 de uma determinada residência. Existe uma tendência de aumento de consumo se observado os primeiros três quartos da série, seguido de uma tendência de queda após a mudança da derivada em torno do ano de 2015, e daí para a frente a série apresenta uma tendência de queda. Observada de forma completa, a série apresenta formato aproximadamente senoidal. Picos na série sugerem algum tipo de padrão sazonal, possivelmente relacionado a utilização de determinados eletrodomésticos, como ar condicionado, em determinadas estações do ano. Existe um pico bastante expressivo na série em torno do ano de 2004 em relação as vizinhanças próximas, que foi descrito em aula como sendo a utilização de uma betoneira neste ano.
+
+Conclusões exploratórias podem ser extraídas ao observar o comportamento da série, como possível aumento do número de residentes no domicílio e aumento do padrão de vida com mais equipamentos eletrodomésticos utilizando energia, seguido de possível diminuição do número de residentes, como filhos que se mudam, e avanço tecnológico de eletrodomésticos mais sustentáveis que utilizam menos energia elétrica.
+
+# Questão 3
+
+```{r, warning=FALSE}
+ts <- dados %>% dplyr::select(mes,Yt) %>% as_tibble() %>% na.omit()
+
+ts = as_tsibble(ts,index=mes,regular=F)
+
+ts %>%
+  ACF(var = Yt,lag_max = 50) %>%
+  autoplot() +
+  labs(title="Função de autocorrelação (FAC)")
+
+```
+
+Este gráfico da função de autocorrelação indica um lento decaimento das autocorrelações em função do crescimento da defasagem (lag). Vemos que todas as barras estão significativamente acima do limite superior da banda de credibilidade, indicando não estacionariedade da série. Neste caso, é indicado uma operação de diferenciação para tornar a série estacionária.
+
+```{r, warning=FALSE}
+
+ts %>%
+  ACF(var = Yt,lag_max = 50,type = "partial") %>%
+  autoplot() +
+  labs(title="Função de autocorrelação parcial (FACP)")
+
+```
+
+Este gráfico da função de autocorrelação parcial indica que a autocorrelação parcial da série é significativa até a defasagem 1, seguido de autocorrelações acima da banda de confiança de 95% por mais 4 defasagens, e, após isso, as autocorrelações não ultrapassam mais significativamente as bandas de confiança de 95%, indicando que a série pode ser modelada por um modelo AR(1) aou até mesmo um modelo AR(2).
+
+# Questão 4
+
+```{r}
+st <- ts(ts$Yt, start = c(1997, 6), frequency = 12)
+aTSA::adf.test(st, nlag = 10)
+```
+
+## Sob a hipótese nula da série ser não estacionária, não rejeitamos a hipótese nula.
+Ou seja, concluímos não haver evidências de estacionariedade da série pelo teste aumentado de Dickey-Fuller.
+
+```{r}
+y <- st
+
+fit1 <- haRmonics(y = y,
+                  numFreq = 1,
+                  delta = 0.1)
+fit3 <- haRmonics(y = y,
+                  numFreq = 3,
+                  delta = 0.1)
+fit6 <- haRmonics(y = y,
+                  numFreq = 6,
+                  delta = 0.1)
+fit12 <- haRmonics(y = y,
+                   numFreq = 12,
+                   delta = 0.1)
+
+x = ts(fit1$fitted, start = c(1997, 6), frequency = 12)
+w = ts(fit3$fitted, start = c(1997, 6), frequency = 12)
+z = ts(fit6$fitted, start = c(1997, 6), frequency = 12)
+v = ts(fit12$fitted, start = c(1997, 6), frequency = 12)
+
+
+plot(y, pch = 16, main = "Previsoes de uma modelagem Harmonica")
+lines(x ,lty = 5, col = "green")
+lines(w, lty = 4, col = "red")
+lines(z, lty = 3, col = "blue")
+lines(v, lty = 2, col = "orange")
+legend("topleft", legend = c("1", "3", "6","12"),
+       col = c("green", "red", "blue","orange"), lty = c(5, 4, 3,2))
+```
+
+Pela Figura, notamos que a regressão harmônica não parece consegue capturar as sazonalidades da série.
+
+# Questão 5
+
+```{r}
+# Calcular Zt = Yt - Yt-1
+ts = ts %>% mutate(Zt = c(NA,diff(Yt)))
+kable(head(ts))
+```
+
+O cálculo da diferenciação da série é crucial para analisar uma série temporal não estacionária. Podemos modelar agora uma série estacionária utilizando um modelo ARIMA, por exemplo.
+
+# Questão 6
+
+```{r, warning=FALSE}
+ts %>%
+  ggplot() +
+  geom_line(aes(x=mes,y=Zt)) + theme_minimal() + ggtitle("Série diferenciada")
+
+```
+
+A série diferenciada parece ser estacionária, com média aparentemente constante centrada em zero, e variância aparentemente constante. A série parece ser um ruído branco, salvo alguns padrões sem tendência empírica. Agora parece ser possível uma modelagem mais confiável, com modelos robustos.
+
+# Questão 7
+
+## Passando uma linha suavizada com auxílio do pacote *timetk* para verificação visual de tendência
+
+```{r, warning=FALSE}
+ts %>%
+  plot_time_series(mes, Zt, .interactive = F, .smooth = T)
+```
+
+## Visualizando a FAC
+
+```{r, warning=FALSE}
+
+ts %>%
+  ACF(var = Zt,lag_max = 50) %>%
+  autoplot() +
+  labs(title="Função de autocorrelação (FAC) sob a diferenciação")
+
+```
+
+A presença de um grande número de valores contido no intervalo da banda de credibilidade indica estacionariedade desta série.
+
+## Visualizando a FACP
+
+```{r, warning=FALSE}
+
+ts %>%
+  ACF(var = Zt,lag_max = 50,type = "partial") %>%
+  autoplot() +
+  labs(title="Função de autocorrelação parcial (FACP) sob a diferenciação")
+
+```
+
+Novamente, os lags para a FACP indicam que a série perdeu suas tendências originais e apresenta comportamento agora aleatório, sugerindo estacionariedade.
+
+```{r}
+st2 <- ts(ts$Zt, start = c(1997, 6), frequency = 12)
+aTSA::adf.test(st2, nlag = 10)
+```
+
+O teste aumentado de Dickey-Fuller sob a hipótese nula de não estacionariedade da série, rejeita a hipótese nula com p-valor $<0,01$. Ou seja, temos fortes indícios apontando para a estacionariedade da série.
+
+```{r}
+st2[1] = 0
+y <- st2
+fit1 <- haRmonics(y = y,
+                  numFreq = 1,
+                  delta = 0.1)
+fit3 <- haRmonics(y = y,
+                  numFreq = 3,
+                  delta = 0.1)
+fit6 <- haRmonics(y = y,
+                  numFreq = 6,
+                  delta = 0.1)
+fit12 <- haRmonics(y = y,
+                   numFreq = 12,
+                   delta = 0.1)
+
+x = ts(fit1$fitted, start = c(1997, 6), frequency = 12)
+w = ts(fit3$fitted, start = c(1997, 6), frequency = 12)
+z = ts(fit6$fitted, start = c(1997, 6), frequency = 12)
+v = ts(fit12$fitted, start = c(1997, 6), frequency = 12)
+
+
+plot(y, pch = 16, main = "Previsoes de uma modelagem Harmonica")
+lines(x ,lty = 5, col = "green")
+lines(w, lty = 4, col = "red")
+lines(z, lty = 3, col = "blue")
+lines(v, lty = 2, col = "orange")
+legend("topleft", legend = c("1", "3", "6","12"),
+       col = c("green", "red", "blue","orange"), lty = c(5, 4, 3,2))
+
+```
+
+Desta vez, o modelo de regressão harmônico capturou as estruturas sazonais da série, retornando apenas ruído branco.
+
+Portanto, a operação de diferenciação foi essencial para definir estacionariedade da série, e prepará-la para modelagem preditiva.
+
+# Questão 8
+
+Com base nos passos anteriores e no fato de se tratar de uma série de consumo energético mensal (da qual espera-se padrões relacionados aos meses e estações do ano), iremos considerar a ordem sazonal s = 12.
+
+Para a ordem de diferenciação, vimos que d = 1 foi suficiente para atingir a estacionariedade da série, bem como uma diferenciação D = 1 para a sazonalidade deve ser suficiente para eliminar a sazonalidade, se confirmado o pressuposto do parágrafo anterior.
+
+O restante dos parâmetros (p,P,q,Q) devem ser obtidos via métodos iterativos, observando o AIC e BIC dos modelos para escolher o que melhor se ajusta aos dados.
+
+Para iniciar o método iterativo, devemos "chutar" um valor inicial, e esperar pela convergência em torno de um valor ótimo partindo do chute inicial.
+
+# Questão 9
+
+Definindo uma malha de valores, e testando todas as combinações entre eles por meio de 4 loops *for*. OBS: Ver questão 10 para explicação dos valores aqui contidos.
+
+```{r,echo=TRUE,cache=T,results='hide',warning=FALSE}
+modelos <- data.frame(p = integer(),
+                      P = integer(),
+                      q = integer(),
+                      Q = integer(),
+                      AIC = numeric(),
+                      BIC = numeric())
+
+tic()
+for(p in 0:2){
+  for(P in 0:2){
+      for(q in 0:3){
+          for(Q in 0:3){
+            tryCatch({
+              fit = astsa::sarima(st, details = FALSE, Model = FALSE,
+                           p = p, d = 1, q = q, P = P, D = 1, Q = Q, S = 12)
+              AIC = fit$ICs[1]
+              BIC = fit$ICs[3]
+              mod = c(p, P, q, Q, AIC, BIC)
+              modelos = rbind(modelos, mod)
+            }, error = function(e) {
+            })
+        }
+      }
+    }
+ }
+toc()
+
+colnames(modelos) = c("p","P","q","Q","AIC","BIC")
+
+```
+
+# Questão 10
+
+Foi testada inicialmente os valores 0, 1 e 2 e as combinações entre eles na primeira rodada da malha da questão anterior. Como haviam modelos candidatos com q ou Q = 2, resolvi expandir a malha desses dois parâmetros. Portanto, os valores testados foram p = [0,1,2], P = [0,1,2], q = [0,1,2,3], Q = [0,1,2,3]. Desta vez, nenhum dos modelos candidatos tinham o parâmetro na margem, portanto parece suficiente estes conjuntos de valores para os 4 parâmetros do modelo, enquanto fixo os parâmetros S = 12 e d = D = 1.
+
+```{r}
+modelos %>%
+  arrange(BIC, AIC) %>% head() %>% kable()
+```
+
+# Questão 11
+
+Pelo observado anteriormente, o modelo que apresentou menor valor *BIC* foi o modelo com parâmetros p = 0, P = 0, q = 1, Q = 1. Portanto, utilizarei este.
+
+```{r}
+fit = astsa::sarima(st,p = 0, d = 1, q = 1, P = 0, D = 1, Q = 1, S = 12)
+```
+
+## 11.2 FAC e FACP
+
+```{r}
+
+res = as_tsibble(fit[["fit"]][["residuals"]])
+
+res %>%
+  ACF(value,lag_max = 50) %>%
+  autoplot() +
+  labs(title="Função de autocorrelação (FAC) sob os resíduos do modelo")
+
+res %>%
+  ACF(value,lag_max = 50,type = "partial") %>%
+  autoplot() +
+  labs(title="Função de autocorrelação parcial (FACP) sob os resíduos do modelo")
+
+```
+
+```{r}
+Box.test(fit[["fit"]][["residuals"]], lag = 50, type = "Ljung")
+```
+
+Sob a hipótese nula de independência, o teste de Ljung-Box não rejeita a hipótese nula. Portanto, existem indícios de independência na série dos resíduos.
+
+Avaliando as formas da FAC, FACP e resultado do teste de Ljung-Box, não aparenta haver autocorrelação significativa com lag = 50 para os resíduos, sugerindo que os resíduos se tratam de ruído branco. Logo, este modelo aparenta ter ajustado quanto a estrutura de dados, sendo um modelo adequado para previsões.
+
+## 11.3 Testes de normalidade dos resíduos:
+
+```{r}
+# Teste de Shapiro-Wilk
+shapiro.test(fit[["fit"]][["residuals"]])
+
+# Teste de Lilliefors
+lillie.test(fit[["fit"]][["residuals"]])
+
+```
+
+Sob a hipótese nula de normalidade dos resíduos, os testes de Shapiro-Wilk e Lilliefors rejeitam a normalidade dos resíduos a 5% de confiança. Entretanto, observando o gráfico Q-Q dos resíduos produzido pela função, notamos que esta rejeição aparenta está relacionada a alguns valores discrepantes na cauda.
+
+## Subitens 11.4 e 11.5:
+
+Não necessário, visto que o modelo aparenta ser adequado.
+
+# Questão 12
+
+## 12.1
+
+```{r}
+fit = astsa::sarima(st,p = 0, d = 1, q = 1, P = 0, D = 1, Q = 1, S = 12)
+```
+
+## 12.2
+
+Previsão 5 passos a frente utilizando a base completa:
+
+```{r}
+prev = sarima.for(st,p = 0, d = 1, q = 1, P = 0, D = 1, Q = 1, S = 12,
+           n.ahead = 5, gg=TRUE, col=4,main="Previsão do modelo completo p/ 5 prox. passos") 
+```
+
+Previsões do modelo:
+
+```{r}
+prev
+```
+
+Fazendo um novo modelo para poder comparar o poder deste: Mantido todos os parâmetros fixo, vamos modelar para as n-5 (319) observações da série, prever os 5 passos seguintes, e depois comparar com o real valor para validação do modelo
+
+```{r}
+treino = ts(st[1:319])
+teste = ts(st[320:324]) 
+```
+
+```{r}
+prev = sarima.for(treino,p = 0, d = 1, q = 1, P = 0, D = 1, Q = 1, S = 12,
+           n.ahead = 5, gg=TRUE, col=4,main="Modelo com n-5 observações, e 5 predições") 
+```
+
+## 12.2
+
+```{r}
+prev$pred
+```
+
+## 12.3 MAPE
+
+```{r}
+MAPE = MAPE(prev$pred, as.vector(teste))
+MAPE
+```
+## 12.4
+
+Com um MAPE = `r MAPE`, ou seja, estando no intervalo 10%-20%, podemos dizer que se trata de um bom modelo preditivo.
+
+# Questão 13
+
+```{r}
+prev = sarima.for(st,p = 0, d = 1, q = 1, P = 0, D = 1, Q = 1, S = 12,
+           n.ahead = 12, gg=TRUE, col=4,main="Previsão do modelo para os próximos 12 passos") 
+```
+
+```{r}
+datas <- seq.Date(from = as.Date("2024-06-01"), to = as.Date("2025-05-31"), by = "months")
+
+previsoes = data.frame(datas,prev$pred,prev$se)
+colnames(previsoes) = c("data","Valores_preditos","Erro_padrao")
+
+previsoes = previsoes %>%
+  mutate(Limite_superior = Valores_preditos + (1.96 * Erro_padrao),
+         Limite_inferior = Valores_preditos - (1.96 * Erro_padrao))
+```
+
+```{r,warning=FALSE}
+
+ggplot(previsoes, aes(x = data)) +
+  geom_line(aes(y = Valores_preditos), color = "blue", size = 1) +
+  geom_point(aes(y = Valores_preditos), color = "blue", size = 3) +
+  geom_ribbon(aes(ymin = Limite_inferior, ymax = Limite_superior), fill = "lightblue", alpha = 0.5) +
+  labs(title = "Valores preditos com banda de previsão c/ 95% de cobertura",
+       x = "",
+       y = "Valores Preditos") +
+  theme_minimal()
+
+```
+
+Modelos de séries temporais em geral não são muito bons para gerar previsões muito a frente dos dados. Talvez as 4 primeiras previsões estejam próximas do esperado (como verificado anteriormente com os modelos incompletos e previsões com dados do conjunto). Logo, utilizar este modelo para prever com alta credibilidade o último ponto (12) pode ser um tanto inverossímil.
+
+A hipótese de normalidade de fato foi descartada no passo 11.3. Entretanto, pelo gráfico Q-Q, podemos não levar com tanta certeza esta hipótese. Para além disso, utilizar um valor maior que 1,96 para gerar a banda de confiança pode ser suficiente, quantilificando uma distribuição aproximadamente normal porém de cauda mais pesada. Talvez esta fosse uma boa estratégia para tornar a análise mais crível.
+
+# Questao 14
+
+Este foi um estudo bem completo para modelagem preditiva. Estudamos a série original, estacionariedade, FAC e FACP. Fiz diagnóstico de necessidade de diferenciação para estacionariedade, definição de sazonalidade, bem como iteração de parâmetros para um modelo ARIMA sazonal. Fizemos diagnóstico dos resíduos, testes de normalidade, e previsões para 5 e 12 passos a frente. Portanto, isso traz credibilidade para as previsões apresentadas ao final, com a resalva do modelo não ser eficiente para previsões muito a frente do escopo. Novas informações de medição de eletricidade porem entretando ser re-inseridas no modelo. Ou seja, se a cada mês for re-inserido o dado de eletricidade lido, pode-se ter um modelo útil para entender o comportamento da energia no trimestre subjacente, por exemplo. Uma boa resalva é quanto a não normalidade dos resíduos, ou seja, a banda de credibilidade pode ser insuficiente para capturar valores atípicos.
